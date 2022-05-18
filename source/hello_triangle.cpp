@@ -14,6 +14,7 @@
 #include <array>
 #include <chrono>
 
+
 #define VK_USE_PLATFORM_WIN32_KHR
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -35,6 +36,10 @@
 #else
         const bool enableValidationLayers = true;
 #endif
+
+#include <imgui.h>
+#include <imgui_impl_vulkan.h>
+#include <imgui_impl_glfw.h>
 
 const std::vector<const char*> validationLayers = {
 	"VK_LAYER_KHRONOS_validation",
@@ -91,6 +96,14 @@ struct Vertex {
 		return attributeDescriptions;
 	}
 };
+
+static void check_vk_result(VkResult err) {
+    if (err == 0)
+        return;
+    fprintf(stderr, "[vulkan] Error: VkResult = %d\n", err);
+    if (err < 0)
+        abort();
+}
 
 
 const std::vector<Vertex> vertices = {
@@ -213,7 +226,20 @@ public:
         while (!glfwWindowShouldClose(m_window)) {
             auto current = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - last_frame_time).count();
 			last_frame_time = std::chrono::high_resolution_clock::now();
+
             glfwPollEvents();
+
+			ImGui_ImplVulkan_NewFrame();
+			ImGui_ImplGlfw_NewFrame();
+			ImGui::NewFrame();
+            ImGui::ShowDemoWindow();
+            ImGui::Begin("Hello!");
+            auto io = ImGui::GetIO();
+            io.WantCaptureMouse = true;
+
+            ImGui::End();
+            ImGui::Render();
+
             drawFrame(current);
             std::cout << 1'000'000.0 / current << '\r';
         }
@@ -226,6 +252,7 @@ private:
     void init() {
         initGLFW();
         initVulkan();
+        initImGui();
     }
 
     void initGLFW() {
@@ -260,6 +287,73 @@ private:
         createDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
+    }
+
+    void initImGui() {
+        //1: create descriptor pool for IMGUI
+        // the size of the pool is very oversize, but it's copied from imgui demo itself.
+        VkDescriptorPoolSize pool_sizes[] =
+        {
+            { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+            { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
+        };
+
+        VkDescriptorPoolCreateInfo pool_info = {};
+        pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        pool_info.maxSets = 1000;
+        pool_info.poolSizeCount = std::size(pool_sizes);
+        pool_info.pPoolSizes = pool_sizes;
+
+        VkDescriptorPool imguiPool;
+        if (vkCreateDescriptorPool(m_device, &pool_info, nullptr, &imguiPool)) {
+            std::cerr << "failed to create ImGui descriptor pool!" << std::endl;
+        }
+
+        // 2: initialize imgui library
+		IMGUI_CHECKVERSION();
+
+        //this initializes the core structures of imgui
+        ImGui::CreateContext();
+		ImGuiIO& io = ImGui::GetIO(); (void)io;
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+		ImGui::StyleColorsDark();
+
+        ImGui_ImplGlfw_InitForVulkan(m_window, true);
+
+        //this initializes imgui for Vulkan
+        ImGui_ImplVulkan_InitInfo init_info = {};
+        init_info.Instance = m_instance;
+        init_info.PhysicalDevice = m_physicalDevice;
+        init_info.Device = m_device;
+        init_info.Queue = m_graphicsQueue;
+        init_info.DescriptorPool = imguiPool;
+        init_info.MinImageCount = 3;
+        init_info.ImageCount = 3;
+        init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
+        ImGui_ImplVulkan_Init(&init_info, m_renderPass);
+
+        //execute a gpu command to upload imgui font textures
+        auto cmd = beginSingleTimeCommands();
+        ImGui_ImplVulkan_CreateFontsTexture(cmd);
+        endSingleTimeCommands(cmd);
+
+        //clear font textures from cpu data
+        ImGui_ImplVulkan_DestroyFontUploadObjects();
+
+        //add the destroy the imgui created structures
+		//vkDestroyDescriptorPool(m_device, imguiPool, nullptr);
+		//ImGui_ImplVulkan_Shutdown();
     }
 
     void createInstance() {
@@ -1489,6 +1583,7 @@ private:
             vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1, &m_descriptorSets[m_currentFrame], 0, nullptr);
             vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
         vkCmdEndRenderPass(commandBuffer);
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
             throw std::runtime_error("failed to record command buffer");
@@ -1530,7 +1625,6 @@ private:
         vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
         recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex);
 
-
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         VkSemaphore waitSemaphores[] = { m_imageAvailableSemaphores[m_currentFrame] };
@@ -1558,7 +1652,7 @@ private:
         presentInfo.pSwapchains = swapchains;
         presentInfo.pImageIndices = &imageIndex;
         presentInfo.pResults = nullptr;
-        
+
         result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_framebufferResized) {
             m_framebufferResized = false;
