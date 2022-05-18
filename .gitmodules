@@ -1,3 +1,6 @@
 [submodule ".\\Vendor\\imgui"]
 	path = .\\Vendor\\imgui
 	url = git@github.com:ocornut/imgui.git
+[submodule "Vendor/imgui"]
+	path = Vendor/imgui
+	url = git@github.com:ocornut/imgui.git
